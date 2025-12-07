@@ -145,6 +145,19 @@ const runOcr = async (requestId, imageBuffer, options = {}) => {
     }
 };
 
+let gutenOcrPromise = null;
+const getGutenOcr = async () => {
+    if (!gutenOcrPromise) {
+        try {
+            const Ocr = require('@gutenye/ocr-node');
+            gutenOcrPromise = Ocr.create();
+        } catch (_) {
+            gutenOcrPromise = null;
+        }
+    }
+    return gutenOcrPromise ? await gutenOcrPromise : null;
+};
+
 const runOcrSegmented = async (requestId, imageBuffer, options = {}) => {
     const { invert = false, thresholdMax = 180, resizeHeight = 150, autocrop = true } = options;
     let processed;
@@ -277,6 +290,33 @@ const handleOcr = async (req, res) => {
         const buffer = Buffer.from(base64Data, 'base64');
         console.log(`[${requestId}] Base64 decoded, buffer length: ${buffer.length}`);
 
+        const normalize = (raw) => {
+            const t = (raw || '').toUpperCase().replace(/[^A-Z]/g, '');
+            if (!t) return '';
+            if (t.length >= 5 && t.startsWith('C') && /^[A-Z]{4}/.test(t.slice(1))) return t.slice(1, 5);
+            if (t.includes('SVNG')) return 'SVNG';
+            if (t.length === 4) return t;
+            return t;
+        };
+
+        const guten = await getGutenOcr();
+        if (guten) {
+            try {
+                const img = await Jimp.read(buffer);
+                const det = await guten.detect({ data: img.bitmap.data, width: img.bitmap.width, height: img.bitmap.height });
+                const lines = det.texts || det || [];
+                const texts = Array.isArray(lines) ? lines.map(x => (x.text || '').toUpperCase()) : [];
+                const picked = texts.find(x => /^[A-Z]{4,6}$/.test(x));
+                const n = normalize(picked || texts[0] || '');
+                if (n && n.length >= 4 && n.length <= 6) {
+                    console.log(`[${requestId}] Guten OCR result: '${n}'`);
+                    return res.json({ solution: n });
+                }
+            } catch (e) {
+                console.log(`[${requestId}] Guten OCR failed, falling back`);
+            }
+        }
+
         // Define strategies
         const strategies = [
             { name: "Standard", options: { psm: '7', scale: 1, preprocess: true } },
@@ -291,15 +331,6 @@ const handleOcr = async (req, res) => {
         ];
 
         let finalResult = "";
-
-        const normalize = (raw) => {
-            const t = (raw || '').toUpperCase().replace(/[^A-Z]/g, '');
-            if (!t) return '';
-            if (t.length >= 5 && t.startsWith('C') && /^[A-Z]{4}/.test(t.slice(1))) return t.slice(1, 5);
-            if (t.includes('SVNG')) return 'SVNG';
-            if (t.length === 4) return t;
-            return t;
-        };
 
         for (const strategy of strategies) {
             console.log(`[${requestId}] Attempting Strategy: ${strategy.name}`);
