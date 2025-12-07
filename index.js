@@ -12,7 +12,7 @@ const port = 3000;
 app.use(bodyParser.json({ limit: '10mb' }));
 
 const runOcr = async (requestId, imageBuffer, options = {}) => {
-    const { psm = '7', scale = 1, invert = false, preprocess = true, threshold = true } = options;
+    const { psm = '7', scale = 1, invert = false, preprocess = true, autocrop = false } = options;
 
     console.log(`[${requestId}] Running OCR attempt. Options: ${JSON.stringify(options)}`);
 
@@ -20,29 +20,17 @@ const runOcr = async (requestId, imageBuffer, options = {}) => {
 
     if (preprocess) {
         try {
-            console.log(`[${requestId}] Preprocessing with Jimp (Scale: ${scale}, Invert: ${invert}, Threshold: ${threshold})...`);
-            // Clone buffer to avoid stream locks or mutation issues
-            const bufferCopy = Buffer.from(imageBuffer);
-            const image = await Jimp.read(bufferCopy);
+            console.log(`[${requestId}] Preprocessing with Jimp (Scale: ${scale}, Invert: ${invert}, Autocrop: ${autocrop})...`);
+            const image = await Jimp.read(imageBuffer);
             
-            if (scale !== 1) {
-                // If scale is 0.5, we resize to half height. If > 1, double.
-                // Assuming standard captcha height ~50-100px.
-                // Let's rely on fixed height resizing for consistency if scale is passed as a "target height" flag, 
-                // but here let's stick to multipliers if provided, OR fixed height strategies.
-                // Strategy: If scale < 1, it's a downsample. If > 1, upsample.
-                
-                const currentW = image.bitmap.width;
-                const currentH = image.bitmap.height;
-                
-                let newW = Math.floor(currentW * scale);
-                let newH = Math.floor(currentH * scale);
-                
-                // Safety check
-                if (newW < 1) newW = 1;
-                if (newH < 1) newH = 1;
+            if (autocrop) {
+                image.autocrop();
+            }
 
-                image.resize({ w: newW, h: newH }); 
+            if (scale !== 1) {
+                // Resize to specific height, auto width
+                // For captchas, height is often the critical factor for Tesseract
+                image.resize({ h: 150 }); 
             }
 
             image.greyscale();
@@ -51,17 +39,18 @@ const runOcr = async (requestId, imageBuffer, options = {}) => {
                 image.invert();
             }
 
-            image.contrast(1); // Increase contrast
+            // A bit of blur can help reduce single-pixel noise
+            // image.blur(1); 
+            image.contrast(1).threshold({ max: 200 });
             
-            if (threshold) {
-                image.threshold({ max: 200 });
-            }
-
             processedBuffer = await image.getBuffer('image/png');
-        } catch (err) {
-            console.error(`[${requestId}] Jimp preprocessing failed:`, err.message);
-            // Fallback to original buffer if preprocessing fails
-            processedBuffer = imageBuffer; 
+        } catch (error) {
+            console.error(`[${requestId}] Jimp preprocessing failed:`, error.message);
+            // If Jimp fails, we return null to signal failure, or we could fallback to raw buffer.
+            // But let's let the loop handle fallbacks.
+            // For now, if preprocessing was requested but failed, we might want to try raw buffer in this same attempt?
+            // No, better to fail this attempt and let the retry logic pick the "raw" strategy.
+            return { text: '', confidence: 0, error: true };
         }
     }
 
@@ -70,7 +59,7 @@ const runOcr = async (requestId, imageBuffer, options = {}) => {
         cachePath: path.join('/tmp', 'eng.traineddata.gz'),
         cacheMethod: 'refresh',
         logger: m => {
-             // Reduce log spam
+             // Reduce log spam, only log major status changes
              if (m.status === 'recognizing text' && m.progress % 0.5 === 0) {
                  console.log(`[${requestId}] [Tesseract] ${m.status}: ${m.progress}`);
              }
@@ -82,13 +71,19 @@ const runOcr = async (requestId, imageBuffer, options = {}) => {
         tessedit_pageseg_mode: psm,
     });
 
-    const { data: { text, confidence } } = await worker.recognize(processedBuffer);
-    await worker.terminate();
+    try {
+        const { data: { text, confidence } } = await worker.recognize(processedBuffer);
+        await worker.terminate();
 
-    const result = text.trim().replace(/[^A-Z]/g, ''); // Ensure only uppercase letters
-    console.log(`[${requestId}] OCR Result: '${result}' (Confidence: ${confidence})`);
-    
-    return { text: result, confidence };
+        const result = text.trim().replace(/[^A-Z]/g, ''); // Ensure only uppercase letters
+        console.log(`[${requestId}] OCR Result: '${result}' (Confidence: ${confidence})`);
+        
+        return { text: result, confidence, error: false };
+    } catch (ocrError) {
+        console.error(`[${requestId}] Tesseract execution failed:`, ocrError.message);
+        await worker.terminate();
+        return { text: '', confidence: 0, error: true };
+    }
 };
 
 // Handler function for OCR
@@ -115,74 +110,45 @@ const handleOcr = async (req, res) => {
         const buffer = Buffer.from(base64Data, 'base64');
         console.log(`[${requestId}] Base64 decoded, buffer length: ${buffer.length}`);
 
-        let bestResult = { text: "", confidence: 0 };
+        // Define strategies
+        const strategies = [
+            // 1. Standard: High contrast, PSM 7 (Single Line)
+            { name: "Standard", options: { psm: '7', scale: 1, preprocess: true } },
+            
+            // 2. Resized + Autocrop: Good for weirdly sized images. Height 150 is usually sweet spot for OCR.
+            { name: "Resize+Autocrop", options: { psm: '7', scale: 0.5, autocrop: true, preprocess: true } }, // scale!=1 triggers resize logic
+            
+            // 3. Raw Buffer: Bypass Jimp entirely if it's crashing or messing up. PSM 7.
+            { name: "Raw Buffer", options: { psm: '7', preprocess: false } },
 
-        // Helper to check if result is good enough
-        const isAcceptable = (res) => {
-            // Confidence threshold: 50. Text length: 3-6 chars (standard captcha)
-            return res.text.length >= 3 && res.text.length <= 8 && res.confidence > 50;
-        };
+            // 4. Inverted: Handle dark background/light text.
+            { name: "Inverted", options: { psm: '7', scale: 1, invert: true, preprocess: true } },
 
-        // --- ATTEMPT 1: Standard (Optimized for "ATLK" style) ---
-        // PSM 7 (Single Line), No Scaling, High Contrast + Threshold
-        let result = await runOcr(requestId, buffer, { psm: '7', scale: 1, preprocess: true, threshold: true });
-        if (isAcceptable(result)) {
-             res.json({ solution: result.text });
-             console.log(`[${requestId}] Success on Attempt 1. Response sent: { solution: '${result.text}' }`);
-             return;
+            // 5. PSM 8 (Single Word): Force Tesseract to find a single word. Good if there's noise.
+            { name: "Single Word Mode", options: { psm: '8', scale: 1, preprocess: true } }
+        ];
+
+        let finalResult = "";
+
+        for (const strategy of strategies) {
+            console.log(`[${requestId}] Attempting Strategy: ${strategy.name}`);
+            const result = await runOcr(requestId, buffer, strategy.options);
+            
+            // Validity check:
+            // 1. Must have text.
+            // 2. Must not be too long (captchas usually < 10 chars). Garbage often is long.
+            if (result.text && result.text.length > 0 && result.text.length < 12) {
+                finalResult = result.text;
+                console.log(`[${requestId}] Success with strategy: ${strategy.name}`);
+                break;
+            } else {
+                console.log(`[${requestId}] Strategy ${strategy.name} failed or produced invalid result ('${result.text}').`);
+            }
         }
-        if (result.confidence > bestResult.confidence) bestResult = result;
 
-        // --- ATTEMPT 2: Resize (Downscale for large images) ---
-        // The failing image was large. Let's try 0.5 scale.
-        console.log(`[${requestId}] Attempt 1 weak. Retrying with resizing (0.5x)...`);
-        result = await runOcr(requestId, buffer, { psm: '7', scale: 0.5, preprocess: true, threshold: true });
-        if (isAcceptable(result)) {
-             res.json({ solution: result.text });
-             console.log(`[${requestId}] Success on Attempt 2. Response sent: { solution: '${result.text}' }`);
-             return;
-        }
-        if (result.confidence > bestResult.confidence) bestResult = result;
-
-        // --- ATTEMPT 3: Soft Processing (No Threshold) ---
-        // Sometimes thresholding kills faint text. Just contrast.
-        console.log(`[${requestId}] Attempt 2 weak. Retrying without thresholding...`);
-        result = await runOcr(requestId, buffer, { psm: '7', scale: 1, preprocess: true, threshold: false });
-        if (isAcceptable(result)) {
-             res.json({ solution: result.text });
-             console.log(`[${requestId}] Success on Attempt 3. Response sent: { solution: '${result.text}' }`);
-             return;
-        }
-        if (result.confidence > bestResult.confidence) bestResult = result;
-
-        // --- ATTEMPT 4: Invert Colors ---
-        console.log(`[${requestId}] Attempt 3 weak. Retrying with inverted colors...`);
-        result = await runOcr(requestId, buffer, { psm: '7', scale: 1, invert: true, preprocess: true, threshold: true });
-        if (isAcceptable(result)) {
-             res.json({ solution: result.text });
-             console.log(`[${requestId}] Success on Attempt 4. Response sent: { solution: '${result.text}' }`);
-             return;
-        }
-        if (result.confidence > bestResult.confidence) bestResult = result;
-        
-        // --- ATTEMPT 5: PSM 6 (Block) as last resort ---
-        // Only if we have nothing decent yet.
-        console.log(`[${requestId}] Attempt 4 weak. Retrying with PSM 6...`);
-        result = await runOcr(requestId, buffer, { psm: '6', scale: 1, preprocess: true, threshold: true });
-        if (isAcceptable(result)) {
-             res.json({ solution: result.text });
-             console.log(`[${requestId}] Success on Attempt 5. Response sent: { solution: '${result.text}' }`);
-             return;
-        }
-        if (result.confidence > bestResult.confidence) bestResult = result;
-
-        // If we reached here, none were "Acceptable" by strict standards.
-        // Return the best one we found, or empty if confidence is garbage (<20).
-        const finalSolution = bestResult.confidence > 30 ? bestResult.text : "";
-        console.log(`[${requestId}] All attempts finished. Best Result: '${bestResult.text}' (Conf: ${bestResult.confidence}). Returning: '${finalSolution}'`);
-        
-        res.json({ solution: finalSolution });
-        console.log(`[${requestId}] Final Response sent: { solution: '${finalSolution}' }`);
+        console.log(`[${requestId}] Final Extracted text: '${finalResult}'`);
+        res.json({ solution: finalResult });
+        console.log(`[${requestId}] Response sent: { solution: '${finalResult}' }`);
 
     } catch (error) {
         console.error(`[${requestId}] Error processing captcha:`, error);
