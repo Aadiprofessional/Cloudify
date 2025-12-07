@@ -12,7 +12,7 @@ console.log('Sending request with captcha image...');
 const options = {
   hostname: 'cloudify-theta.vercel.app',
   port: 443,
-  path: '/solve', // <--- change this based on your route, if root then "/"
+  path: '/', // <--- change this based on your route, if root then "/"
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',
