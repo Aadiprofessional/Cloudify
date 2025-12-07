@@ -3,13 +3,17 @@ const bodyParser = require('body-parser');
 const { createWorker } = require('tesseract.js');
 const { Jimp } = require('jimp');
 
+const path = require('path');
+const fs = require('fs');
+
 const app = express();
 const port = 3000;
 
 // Middleware to parse JSON bodies. Increase limit for base64 images.
 app.use(bodyParser.json({ limit: '10mb' }));
 
-app.post('/', async (req, res) => {
+// Handler function for OCR
+const handleOcr = async (req, res) => {
     try {
         const { captcha } = req.body;
 
@@ -29,7 +33,12 @@ app.post('/', async (req, res) => {
         const processedBuffer = await image.getBuffer('image/png');
 
         // OCR with Tesseract
-        const worker = await createWorker('eng');
+        // Use /tmp for cache on serverless environments
+        const worker = await createWorker('eng', 1, {
+            cachePath: path.join('/tmp', 'eng.traineddata.gz'),
+            cacheMethod: 'refresh', // Force refresh or use 'readOnly' if we ship the file
+        });
+        
         await worker.setParameters({
             tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
             tessedit_pageseg_mode: '7',
@@ -47,8 +56,15 @@ app.post('/', async (req, res) => {
         console.error('Error processing captcha:', error);
         res.status(500).json({ error: 'Failed to process captcha' });
     }
-});
+};
 
-app.listen(port, () => {
-    console.log(`OCR Service listening at http://localhost:${port}`);
-});
+app.post('/', handleOcr);
+app.post('/solve', handleOcr);
+
+if (require.main === module) {
+    app.listen(port, () => {
+        console.log(`OCR Service listening at http://localhost:${port}`);
+    });
+}
+
+module.exports = app;
