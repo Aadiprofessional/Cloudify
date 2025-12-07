@@ -1,0 +1,20 @@
+{
+  "name": "ocr-service",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "body-parser": "^2.2.1",
+    "express": "^5.2.1",
+    "jimp": "^1.6.0",
+    "ocrad.js": "^0.0.1",
+    "tesseract.js": "^6.0.1"
+  }
+}
