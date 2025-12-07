@@ -12,7 +12,7 @@ const port = 3000;
 app.use(bodyParser.json({ limit: '10mb' }));
 
 const runOcr = async (requestId, imageBuffer, options = {}) => {
-    const { psm = '7', scale = 1, invert = false, preprocess = true, autocrop = false, resizeHeight = null } = options;
+    const { psm = '7', scale = 1, invert = false, preprocess = true, autocrop = false, resizeHeight = null, thresholdMax = 200 } = options;
 
     console.log(`[${requestId}] Running OCR attempt. Options: ${JSON.stringify(options)}`);
 
@@ -41,9 +41,7 @@ const runOcr = async (requestId, imageBuffer, options = {}) => {
                 image.invert();
             }
 
-            // A bit of blur can help reduce single-pixel noise
-            // image.blur(1); 
-            image.contrast(1).threshold({ max: 200 });
+            image.contrast(1).threshold({ max: thresholdMax });
             
             processedBuffer = await image.getBuffer('image/png');
         } catch (error) {
@@ -74,13 +72,37 @@ const runOcr = async (requestId, imageBuffer, options = {}) => {
     });
 
     try {
-        const { data: { text, confidence } } = await worker.recognize(processedBuffer);
+        const { data } = await worker.recognize(processedBuffer);
         await worker.terminate();
 
-        const result = text.trim().replace(/[^A-Z]/g, ''); // Ensure only uppercase letters
-        console.log(`[${requestId}] OCR Result: '${result}' (Confidence: ${confidence})`);
-        
-        return { text: result, confidence, error: false };
+        const baseText = (data.text || '').toUpperCase().replace(/[^A-Z]/g, '').trim();
+        let bestText = baseText;
+        let bestConf = data.confidence || 0;
+
+        if (Array.isArray(data.words) && data.words.length) {
+            const candidates = data.words.map(w => ({
+                text: (w.text || '').toUpperCase().replace(/[^A-Z]/g, ''),
+                confidence: w.confidence || 0
+            })).filter(c => c.text.length >= 3 && c.text.length <= 10);
+            candidates.sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
+            if (candidates[0] && (candidates[0].confidence || 0) >= bestConf) {
+                bestText = candidates[0].text;
+                bestConf = candidates[0].confidence || 0;
+            }
+        }
+
+        if (Array.isArray(data.symbols) && data.symbols.length) {
+            const letters = data.symbols.map(s => (s.text || '').toUpperCase()).filter(ch => /^[A-Z]$/.test(ch));
+            const avgConf = data.symbols.reduce((sum, s) => sum + (s.confidence || 0), 0) / data.symbols.length;
+            const symbolsText = letters.join('');
+            if (symbolsText.length >= 3 && symbolsText.length <= 10 && avgConf >= bestConf) {
+                bestText = symbolsText;
+                bestConf = avgConf;
+            }
+        }
+
+        console.log(`[${requestId}] OCR Result: '${bestText}' (Confidence: ${bestConf})`);
+        return { text: bestText, confidence: bestConf, error: false };
     } catch (ocrError) {
         console.error(`[${requestId}] Tesseract execution failed:`, ocrError.message);
         await worker.terminate();
@@ -114,26 +136,14 @@ const handleOcr = async (req, res) => {
 
         // Define strategies
         const strategies = [
-            // 1. Standard: High contrast, PSM 7 (Single Line)
             { name: "Standard", options: { psm: '7', scale: 1, preprocess: true } },
-            
-            // 2. Resized + Autocrop: Good for weirdly sized images. Height 150 is usually sweet spot for OCR.
-            { name: "Resize+Autocrop", options: { psm: '7', scale: 0.5, autocrop: true, preprocess: true } }, // scale!=1 triggers resize logic
-            
-            // 3. Raw Buffer: Bypass Jimp entirely if it's crashing or messing up. PSM 7.
+            { name: "Resize+Autocrop", options: { psm: '7', scale: 0.5, autocrop: true, preprocess: true } },
             { name: "Raw Buffer", options: { psm: '7', preprocess: false } },
-
-            // 4. Inverted: Handle dark background/light text.
             { name: "Inverted", options: { psm: '7', scale: 1, invert: true, preprocess: true } },
-
-            // 5. PSM 8 (Single Word): Force Tesseract to find a single word. Good if there's noise.
             { name: "Single Word Mode", options: { psm: '8', scale: 1, preprocess: true } },
-
-            // 6. PSM 8 Resized (100px): Often fixes "CSVNG" -> "SVNG" issues by normalizing size
-            { name: "Single Word Resized 100", options: { psm: '8', resizeHeight: 100, preprocess: true } },
-
-            // 7. PSM 8 Resized (125px)
-            { name: "Single Word Resized 125", options: { psm: '8', resizeHeight: 125, preprocess: true } }
+            { name: "Single Word Resized 100", options: { psm: '8', resizeHeight: 100, autocrop: true, preprocess: true, thresholdMax: 180 } },
+            { name: "Single Word Resized 125", options: { psm: '8', resizeHeight: 125, autocrop: true, preprocess: true, thresholdMax: 180 } },
+            { name: "Single Word Resized 150", options: { psm: '8', resizeHeight: 150, autocrop: true, preprocess: true, thresholdMax: 180 } }
         ];
 
         let finalResult = "";
@@ -145,7 +155,7 @@ const handleOcr = async (req, res) => {
             // Validity check:
             // 1. Must have text.
             // 2. Must not be too long (captchas usually < 10 chars). Garbage often is long.
-            if (result.text && result.text.length > 0 && result.text.length < 12) {
+            if (result.text && result.text.length > 0 && result.text.length < 12 && result.confidence >= 10) {
                 finalResult = result.text;
                 console.log(`[${requestId}] Success with strategy: ${strategy.name}`);
                 break;
