@@ -7,7 +7,10 @@
   ],
   "functions": {
     "index.js": {
-      "includeFiles": "node_modules/tesseract.js-core/**"
+      "includeFiles": [
+        "node_modules/tesseract.js-core/**",
+        "lang-data/**"
+      ]
     }
   }
 }
