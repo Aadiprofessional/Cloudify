@@ -12,7 +12,7 @@ const port = 3000;
 app.use(bodyParser.json({ limit: '10mb' }));
 
 const runOcr = async (requestId, imageBuffer, options = {}) => {
-    const { psm = '7', scale = 1, invert = false, preprocess = true, autocrop = false } = options;
+    const { psm = '7', scale = 1, invert = false, preprocess = true, autocrop = false, resizeHeight = null } = options;
 
     console.log(`[${requestId}] Running OCR attempt. Options: ${JSON.stringify(options)}`);
 
@@ -20,14 +20,16 @@ const runOcr = async (requestId, imageBuffer, options = {}) => {
 
     if (preprocess) {
         try {
-            console.log(`[${requestId}] Preprocessing with Jimp (Scale: ${scale}, Invert: ${invert}, Autocrop: ${autocrop})...`);
+            console.log(`[${requestId}] Preprocessing with Jimp (Scale: ${scale}, Invert: ${invert}, Autocrop: ${autocrop}, ResizeHeight: ${resizeHeight})...`);
             const image = await Jimp.read(imageBuffer);
             
             if (autocrop) {
                 image.autocrop();
             }
 
-            if (scale !== 1) {
+            if (resizeHeight) {
+                image.resize({ h: resizeHeight });
+            } else if (scale !== 1) {
                 // Resize to specific height, auto width
                 // For captchas, height is often the critical factor for Tesseract
                 image.resize({ h: 150 }); 
@@ -125,7 +127,13 @@ const handleOcr = async (req, res) => {
             { name: "Inverted", options: { psm: '7', scale: 1, invert: true, preprocess: true } },
 
             // 5. PSM 8 (Single Word): Force Tesseract to find a single word. Good if there's noise.
-            { name: "Single Word Mode", options: { psm: '8', scale: 1, preprocess: true } }
+            { name: "Single Word Mode", options: { psm: '8', scale: 1, preprocess: true } },
+
+            // 6. PSM 8 Resized (100px): Often fixes "CSVNG" -> "SVNG" issues by normalizing size
+            { name: "Single Word Resized 100", options: { psm: '8', resizeHeight: 100, preprocess: true } },
+
+            // 7. PSM 8 Resized (125px)
+            { name: "Single Word Resized 125", options: { psm: '8', resizeHeight: 125, preprocess: true } }
         ];
 
         let finalResult = "";
