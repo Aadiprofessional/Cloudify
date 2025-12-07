@@ -12,9 +12,6 @@ const port = 3000;
 // Middleware to parse JSON bodies. Increase limit for base64 images.
 app.use(bodyParser.json({ limit: '10mb' }));
 
-// Global worker instance for reuse
-let worker = null;
-
 // Handler function for OCR
 const handleOcr = async (req, res) => {
     try {
@@ -35,23 +32,21 @@ const handleOcr = async (req, res) => {
         image.greyscale().contrast(1).threshold({ max: 200 });
         const processedBuffer = await image.getBuffer('image/png');
 
-        // Initialize worker if not exists
-        if (!worker) {
-            console.log('Initializing Tesseract worker...');
-            worker = await createWorker('eng', 1, {
-                langPath: path.join(__dirname, 'lang-data'),
-                cachePath: '/tmp',
-            });
-            
-            await worker.setParameters({
-                tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
-                tessedit_pageseg_mode: '7',
-            });
-        }
+        // OCR with Tesseract
+        // Use /tmp for cache on serverless environments
+        const worker = await createWorker('eng', 1, {
+            cachePath: path.join('/tmp', 'eng.traineddata.gz'),
+            cacheMethod: 'refresh', // Force refresh or use 'readOnly' if we ship the file
+        });
+        
+        await worker.setParameters({
+            tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+            tessedit_pageseg_mode: '7',
+        });
 
         const { data: { text } } = await worker.recognize(processedBuffer);
-        // Do NOT terminate worker to reuse it
-        
+        await worker.terminate();
+
         const extractedText = text.trim();
         console.log('Extracted text:', extractedText);
 
@@ -59,11 +54,6 @@ const handleOcr = async (req, res) => {
 
     } catch (error) {
         console.error('Error processing captcha:', error);
-        // If worker crashed, reset it
-        if (worker) {
-            try { await worker.terminate(); } catch (e) {}
-            worker = null;
-        }
         res.status(500).json({ error: 'Failed to process captcha' });
     }
 };
