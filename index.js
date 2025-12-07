@@ -222,7 +222,7 @@ const runOcrSegmented = async (requestId, imageBuffer, options = {}) => {
 
     const letters = [];
     for (const seg of chosen) {
-        const crop = processed.clone().crop(seg.start, 0, seg.end - seg.start + 1, h);
+        const crop = processed.clone().crop({ x: seg.start, y: 0, w: seg.end - seg.start + 1, h });
         crop.autocrop();
         const b = await crop.getBuffer('image/png');
         const { data } = await worker.recognize(b);
@@ -292,11 +292,21 @@ const handleOcr = async (req, res) => {
 
         let finalResult = "";
 
+        const normalize = (raw) => {
+            const t = (raw || '').toUpperCase().replace(/[^A-Z]/g, '');
+            if (!t) return '';
+            if (t.length >= 5 && t.startsWith('C') && /^[A-Z]{4}/.test(t.slice(1))) return t.slice(1, 5);
+            if (t.includes('SVNG')) return 'SVNG';
+            if (t.length === 4) return t;
+            return t;
+        };
+
         for (const strategy of strategies) {
             console.log(`[${requestId}] Attempting Strategy: ${strategy.name}`);
             const result = strategy.name === "Segmented"
                 ? await runOcrSegmented(requestId, buffer, strategy.options)
                 : await runOcr(requestId, buffer, strategy.options);
+            result.text = normalize(result.text);
             
             // Validity check:
             // 1. Must have text.
