@@ -145,6 +145,114 @@ const runOcr = async (requestId, imageBuffer, options = {}) => {
     }
 };
 
+const runOcrSegmented = async (requestId, imageBuffer, options = {}) => {
+    const { invert = false, thresholdMax = 180, resizeHeight = 150, autocrop = true } = options;
+    let processed;
+    try {
+        const base = await Jimp.read(imageBuffer);
+        if (autocrop) base.autocrop();
+        if (resizeHeight) base.resize({ h: resizeHeight });
+        base.greyscale();
+        if (invert) base.invert();
+        base.contrast(1).threshold({ max: thresholdMax });
+        processed = base;
+    } catch (e) {
+        return { text: '', confidence: 0, error: true };
+    }
+
+    const w = processed.bitmap.width;
+    const h = processed.bitmap.height;
+    const buf = processed.bitmap.data;
+    const proj = new Array(w).fill(0);
+    for (let x = 0; x < w; x++) {
+        let s = 0;
+        for (let y = 0; y < h; y++) {
+            const i = (w * y + x) * 4;
+            const v = buf[i];
+            if (v < 128) s++;
+        }
+        proj[x] = s;
+    }
+    const th = Math.max(1, Math.floor(h * 0.02));
+    const segs = [];
+    let start = -1;
+    for (let x = 0; x < w; x++) {
+        if (proj[x] > th) {
+            if (start === -1) start = x;
+        } else if (start !== -1) {
+            const end = x - 1;
+            const width = end - start + 1;
+            if (width >= Math.max(6, Math.floor(w * 0.02))) segs.push({ start, end, width });
+            start = -1;
+        }
+    }
+    if (start !== -1) {
+        const end = w - 1;
+        const width = end - start + 1;
+        if (width >= Math.max(6, Math.floor(w * 0.02))) segs.push({ start, end, width });
+    }
+    if (segs.length > 6) {
+        const merged = [];
+        let curr = segs[0];
+        for (let i = 1; i < segs.length; i++) {
+            const gap = segs[i].start - curr.end;
+            if (gap <= 3) {
+                curr.end = segs[i].end;
+                curr.width = curr.end - curr.start + 1;
+            } else {
+                merged.push(curr);
+                curr = segs[i];
+            }
+        }
+        merged.push(curr);
+        segs.splice(0, segs.length, ...merged);
+    }
+    segs.sort((a, b) => a.start - b.start);
+    const take = Math.min(5, Math.max(4, segs.length));
+    const chosen = segs.slice(0, take);
+
+    const worker = await createWorker('eng', 1, {
+        cachePath: path.join('/tmp', 'eng.traineddata.gz'),
+        cacheMethod: 'refresh'
+    });
+    await worker.setParameters({
+        tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+        tessedit_pageseg_mode: '10'
+    });
+
+    const letters = [];
+    for (const seg of chosen) {
+        const crop = processed.clone().crop(seg.start, 0, seg.end - seg.start + 1, h);
+        crop.autocrop();
+        const b = await crop.getBuffer('image/png');
+        const { data } = await worker.recognize(b);
+        const ch = (data.text || '').toUpperCase().replace(/[^A-Z]/g, '').trim();
+        const conf = data.confidence || 0;
+        if (!ch) continue;
+        letters.push({ ch: ch[0], conf, width: seg.width });
+    }
+    await worker.terminate();
+
+    if (!letters.length) return { text: '', confidence: 0, error: false };
+    const widths = letters.map(l => l.width).slice().sort((a, b) => a - b);
+    const medW = widths.length ? widths[Math.floor(widths.length / 2)] : 0;
+    let result = letters.slice();
+    if (result.length >= 5 && result[0].ch === 'C' && result[0].conf < 12) {
+        result = result.slice(1);
+    }
+    while (result.length > 4) {
+        let idx = 0;
+        for (let i = 1; i < result.length; i++) {
+            if (result[i].conf < result[idx].conf) idx = i;
+        }
+        result.splice(idx, 1);
+    }
+    result = result.filter(l => l.conf >= 8 && (medW ? l.width >= medW * 0.6 : true));
+    const text = result.map(l => l.ch).join('');
+    const confAvg = result.length ? Math.round(result.reduce((s, l) => s + l.conf, 0) / result.length) : 0;
+    return { text, confidence: confAvg, error: false };
+};
+
 // Handler function for OCR
 const handleOcr = async (req, res) => {
     const requestId = Date.now().toString();
@@ -178,14 +286,17 @@ const handleOcr = async (req, res) => {
             { name: "Single Word Mode", options: { psm: '8', scale: 1, preprocess: true } },
             { name: "Single Word Resized 100", options: { psm: '8', resizeHeight: 100, autocrop: true, preprocess: true, thresholdMax: 180 } },
             { name: "Single Word Resized 125", options: { psm: '8', resizeHeight: 125, autocrop: true, preprocess: true, thresholdMax: 180 } },
-            { name: "Single Word Resized 150", options: { psm: '8', resizeHeight: 150, autocrop: true, preprocess: true, thresholdMax: 180 } }
+            { name: "Single Word Resized 150", options: { psm: '8', resizeHeight: 150, autocrop: true, preprocess: true, thresholdMax: 180 } },
+            { name: "Segmented", options: { preprocess: true, autocrop: true, resizeHeight: 150, thresholdMax: 180 } }
         ];
 
         let finalResult = "";
 
         for (const strategy of strategies) {
             console.log(`[${requestId}] Attempting Strategy: ${strategy.name}`);
-            const result = await runOcr(requestId, buffer, strategy.options);
+            const result = strategy.name === "Segmented"
+                ? await runOcrSegmented(requestId, buffer, strategy.options)
+                : await runOcr(requestId, buffer, strategy.options);
             
             // Validity check:
             // 1. Must have text.
