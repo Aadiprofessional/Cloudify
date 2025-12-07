@@ -92,12 +92,47 @@ const runOcr = async (requestId, imageBuffer, options = {}) => {
         }
 
         if (Array.isArray(data.symbols) && data.symbols.length) {
-            const letters = data.symbols.map(s => (s.text || '').toUpperCase()).filter(ch => /^[A-Z]$/.test(ch));
-            const avgConf = data.symbols.reduce((sum, s) => sum + (s.confidence || 0), 0) / data.symbols.length;
-            const symbolsText = letters.join('');
-            if (symbolsText.length >= 3 && symbolsText.length <= 10 && avgConf >= bestConf) {
-                bestText = symbolsText;
-                bestConf = avgConf;
+            const raw = data.symbols.map(s => ({
+                ch: (s.text || '').toUpperCase(),
+                conf: s.confidence || 0,
+                bbox: s.bbox || s
+            })).filter(s => /^[A-Z]$/.test(s.ch));
+
+            const heights = raw.map(s => {
+                if (s.bbox && typeof s.bbox.h === 'number') return s.bbox.h;
+                if (s.bbox && typeof s.bbox.y1 === 'number' && typeof s.bbox.y0 === 'number') return Math.abs(s.bbox.y1 - s.bbox.y0);
+                return 0;
+            }).filter(h => h > 0);
+
+            const sortedH = heights.slice().sort((a, b) => a - b);
+            const medianH = sortedH.length ? sortedH[Math.floor(sortedH.length / 2)] : 0;
+            const minConf = 10;
+
+            const positioned = raw.map(s => ({
+                ch: s.ch,
+                conf: s.conf,
+                h: (s.bbox && typeof s.bbox.h === 'number') ? s.bbox.h : medianH,
+                x: (s.bbox && typeof s.bbox.x === 'number') ? s.bbox.x : (s.bbox && typeof s.bbox.x0 === 'number' ? s.bbox.x0 : 0)
+            }));
+
+            const selected = positioned
+                .filter(s => s.conf >= minConf && (medianH ? s.h >= medianH * 0.6 : true))
+                .sort((a, b) => a.x - b.x);
+
+            let candidate = selected.map(s => s.ch).join('');
+            const avgConfSel = selected.length ? selected.reduce((sum, s) => sum + s.conf, 0) / selected.length : 0;
+
+            if (selected.length >= 2 && selected[0].ch === 'C' && selected[0].conf < 12) {
+                candidate = selected.slice(1).map(s => s.ch).join('');
+            }
+
+            const lenBonus = candidate.length === 4 ? 10 : candidate.length === 5 ? 6 : candidate.length === 6 ? 4 : candidate.length === 3 ? 2 : 0;
+            const candidateScore = avgConfSel + lenBonus;
+            const bestScore = (bestConf || 0) + (bestText.length === 4 ? 10 : 0);
+
+            if (candidate.length >= 3 && candidate.length <= 10 && candidateScore >= bestScore) {
+                bestText = candidate;
+                bestConf = avgConfSel;
             }
         }
 
@@ -155,7 +190,8 @@ const handleOcr = async (req, res) => {
             // Validity check:
             // 1. Must have text.
             // 2. Must not be too long (captchas usually < 10 chars). Garbage often is long.
-            if (result.text && result.text.length > 0 && result.text.length < 12 && result.confidence >= 10) {
+            const confOk = result.confidence >= 10 || (result.text && result.text.length === 4);
+            if (result.text && result.text.length > 0 && result.text.length < 12 && confOk) {
                 finalResult = result.text;
                 console.log(`[${requestId}] Success with strategy: ${strategy.name}`);
                 break;
