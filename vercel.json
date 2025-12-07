@@ -7,7 +7,7 @@
   ],
   "functions": {
     "index.js": {
-      "includeFiles": "node_modules/{tesseract.js-core,@gutenye,onnxruntime-node}/**"
+      "includeFiles": "node_modules/tesseract.js-core/**"
     }
   }
 }
