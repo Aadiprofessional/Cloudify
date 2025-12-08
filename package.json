@@ -14,7 +14,6 @@
     "body-parser": "^2.2.1",
     "express": "^5.2.1",
     "jimp": "^1.6.0",
-    "ocrad.js": "^0.0.1",
     "tesseract.js": "^6.0.1"
   }
 }
