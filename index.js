@@ -126,8 +126,8 @@ const handleOcr = async (req, res) => {
             // Keep SVNG fix just in case
             if (t.includes('SVNG')) return 'SVNG';
             if (t === 'CATLE') return 'ATLK'; // Explicit fix for persistent error if fallback used
-            if (t === 'YZT') return 'YZMT'; // Fix for YZMT (Standard Scaled often gets YZT)
-            if (t === 'LYIMT') return 'YZMT'; // Fix for YZMT (Single Word often gets LYIMT)
+            if (t === 'YZT') return 'YZMI'; // Fix for YZMT (Standard Scaled often gets YZT)
+            if (t === 'LYIMT') return 'YZMI'; // Fix for YZMT (Single Word often gets LYIMT)
             
             if (t.length > 4 && t.startsWith('C') && t.endsWith('E')) {
                  // Try removing C
