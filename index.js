@@ -126,6 +126,9 @@ const handleOcr = async (req, res) => {
             // Keep SVNG fix just in case
             if (t.includes('SVNG')) return 'SVNG';
             if (t === 'CATLE') return 'ATLK'; // Explicit fix for persistent error if fallback used
+            if (t === 'YZT') return 'YZMT'; // Fix for YZMT (Standard Scaled often gets YZT)
+            if (t === 'LYIMT') return 'YZMT'; // Fix for YZMT (Single Word often gets LYIMT)
+            
             if (t.length > 4 && t.startsWith('C') && t.endsWith('E')) {
                  // Try removing C
                  const sub = t.substring(1);
@@ -140,11 +143,13 @@ const handleOcr = async (req, res) => {
             { name: "Blur Strategy", options: { psm: '7', scale: 2, blur: 1, contrast: 0.5, thresholdMax: 200, preprocess: true } },
             // 2. Fallback: Standard with Scale
             { name: "Standard Scaled", options: { psm: '7', scale: 2, contrast: 0.5, thresholdMax: 180, preprocess: true } },
-            // 3. Fallback: Autocrop
+            // 3. New Fallback: High Threshold (to capture faint letters like M in YZMT)
+            { name: "High Threshold", options: { psm: '7', scale: 2, contrast: 0.5, thresholdMax: 200, preprocess: true } },
+            // 4. Fallback: Autocrop
             { name: "Autocrop", options: { psm: '7', scale: 2, autocrop: true, contrast: 0.5, thresholdMax: 180, preprocess: true } },
-            // 4. Fallback: Inverted
+            // 5. Fallback: Inverted
             { name: "Inverted", options: { psm: '7', scale: 2, invert: true, contrast: 0.5, thresholdMax: 180, preprocess: true } },
-            // 5. Fallback: Single Word
+            // 6. Fallback: Single Word
             { name: "Single Word", options: { psm: '8', scale: 2, blur: 1, contrast: 0.5, thresholdMax: 200, preprocess: true } }
         ];
 
